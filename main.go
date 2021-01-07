@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dfuse-io/bstream"
 	pbcodec "github.com/dfuse-io/dfuse-eosio/pb/dfuse/eosio/codec/v1"
 	"github.com/dfuse-io/dgrpc"
 	"github.com/dfuse-io/logging"
@@ -17,70 +18,102 @@ import (
 	"github.com/paulbellamy/ratecounter"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"golang.org/x/oauth2"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/oauth"
 )
 
+var retryDelay = 5 * time.Second
 var statusFrequency = 15 * time.Second
 var traceEnabled = logging.IsTraceEnabled("consumer", "github.com/dfuse-io/playground-firehose-go")
 var zlog = logging.NewSimpleLogger("consumer", "github.com/dfuse-io/playground-firehose-go")
 
+func init() {
+	logging.TestingOverride()
+}
+
 func main() {
+	token := os.Getenv("DFUSE_API_TOKEN")
+
+	ensure(token != "", errorUsage("the environment variable DFUSE_API_TOKEN must be set to a valid dfuse API JWT token"))
 	ensure(len(os.Args) >= 4, errorUsage("missing arguments"))
 
 	endpoint := os.Args[1]
 	filter := os.Args[2]
 	blockRange := newBlockRange(os.Args[3])
 
+	cursor := bstream.BlockRefEmpty
 	conn, err := dgrpc.NewExternalClient(endpoint)
 	noError(err, "unable to create external gRPC client to %q", endpoint)
 
-	nextStatus := time.Now().Add(statusFrequency)
 	client := pbbstream.NewBlockStreamV2Client(conn)
 	stats := newStats()
+	nextStatus := time.Now().Add(statusFrequency)
 
-	// FIXME: Implement auto-retry ...
 	zlog.Info("Starting firehose test", zap.String("endpoint", endpoint), zap.String("filter", filter), zap.Stringer("range", blockRange))
-	stream, err := client.Blocks(context.Background(), &pbbstream.BlocksRequestV2{
-		Decoded:           true,
-		StartBlockNum:     int64(blockRange.start),
-		StopBlockNum:      blockRange.end,
-		ExcludeStartBlock: false,
-		ExcludeStopBlock:  true,
-		HandleForks:       true,
-		HandleForksSteps:  []pbbstream.ForkStep{pbbstream.ForkStep_STEP_IRREVERSIBLE},
-		IncludeFilterExpr: filter,
-	})
-	noError(err, "unable to start blocks stream")
-
+stream:
 	for {
-		// FIXME: Implement some backoff retry sleep here, at which place exactly?
-		zlog.Debug("Waiting for message to reach us")
-		response, err := stream.Recv()
-		if err != nil {
-			if err == io.EOF {
+		start := blockRange.start
+		if cursor.Num() > start {
+			start = cursor.Num()
+		}
+
+		credentials := oauth.NewOauthAccess(&oauth2.Token{AccessToken: token, TokenType: "Bearer"})
+		stream, err := client.Blocks(context.Background(), &pbbstream.BlocksRequestV2{
+			Decoded: true,
+			// FIXME: This works only when streaming irreversible only, the full block reference should
+			//        be used but Firehose has a bug around StartBlockId (wrong type)
+			StartBlockNum:     int64(start),
+			StopBlockNum:      blockRange.end,
+			ExcludeStartBlock: false,
+			ExcludeStopBlock:  true,
+			HandleForks:       true,
+			HandleForksSteps:  []pbbstream.ForkStep{pbbstream.ForkStep_STEP_IRREVERSIBLE},
+			IncludeFilterExpr: filter,
+		}, grpc.PerRPCCredentials(credentials))
+		noError(err, "unable to start blocks stream")
+
+		for {
+			zlog.Debug("Waiting for message to reach us")
+			response, err := stream.Recv()
+			if err != nil {
+				if err == io.EOF {
+					if cursor.Num() >= blockRange.end-1 {
+						// Complete the outer loop which terminates streaming blocks
+						break stream
+					}
+
+					// FIXME: The firehose service has a bug where it can stop prior finishing the range, so until
+					//        it's fixed, we are going to break our the loop and restart the stream to continue further.
+					zlog.Warn("Stream closed while end range not reached, retrying", zap.Stringer("cursor", cursor), zap.Duration("retry_delay", retryDelay))
+					break
+				}
+
+				zlog.Error("Stream encountered a remote error, going to retry", zap.Stringer("cursor", cursor), zap.Duration("retry_delay", retryDelay), zap.Error(err))
 				break
 			}
 
-			zlog.Error("An error occurred while streaming blocks", zap.Error(err))
-			break
+			zlog.Debug("Decoding received message's block")
+			block := &pbcodec.Block{}
+			err = ptypes.UnmarshalAny(response.Block, block)
+			noError(err, "should have been able to unmarshal received block payload")
+
+			cursor = block.AsRef()
+			if traceEnabled {
+				zlog.Debug("Block received", zap.Stringer("block", cursor), zap.Stringer("previous", bstream.NewBlockRefFromID(block.PreviousID())))
+			}
+
+			stats.recordBlock(int64(response.XXX_Size()))
+
+			now := time.Now()
+			if now.After(nextStatus) {
+				zlog.Info("Stream blocks progress", zap.Object("stats", stats))
+				nextStatus = now.Add(statusFrequency)
+			}
 		}
 
-		zlog.Debug("Decoding received message's block")
-		block := &pbcodec.Block{}
-		err = ptypes.UnmarshalAny(response.Block, block)
-		noError(err, "should have been able to unmarshal received block payload")
-
-		if traceEnabled {
-			zlog.Debug("block ")
-		}
-
-		stats.blockReceived.IncBy(1)
-		stats.bytesReceived.IncBy(int64(response.XXX_Size()))
-
-		now := time.Now()
-		if now.After(nextStatus) {
-			zlog.Info("Stream blocks progress", zap.Object("stats", stats))
-			nextStatus = now.Add(statusFrequency)
-		}
+		time.Sleep(5 * time.Second)
+		stats.restartCount.IncBy(1)
 	}
 
 	elapsed := stats.duration()
@@ -88,14 +121,22 @@ func main() {
 	fmt.Println("")
 	fmt.Println("Completed streaming")
 	fmt.Printf("Duration: %s\n", elapsed)
+	fmt.Printf("Time to first block: %s\n", stats.timeToFirstBlock)
+	if stats.restartCount.total > 0 {
+		fmt.Printf("Restart count: %s\n", stats.restartCount.Overall(elapsed))
+	}
+
+	fmt.Println("")
 	fmt.Printf("Block received: %s\n", stats.blockReceived.Overall(elapsed))
 	fmt.Printf("Bytes received: %s\n", stats.bytesReceived.Overall(elapsed))
 }
 
 type stats struct {
-	startTime     time.Time
-	blockReceived *counter
-	bytesReceived *counter
+	startTime        time.Time
+	timeToFirstBlock time.Duration
+	blockReceived    *counter
+	bytesReceived    *counter
+	restartCount     *counter
 }
 
 func newStats() *stats {
@@ -103,6 +144,7 @@ func newStats() *stats {
 		startTime:     time.Now(),
 		blockReceived: &counter{0, ratecounter.NewRateCounter(1 * time.Second), "block", "s"},
 		bytesReceived: &counter{0, ratecounter.NewRateCounter(1 * time.Second), "byte", "s"},
+		restartCount:  &counter{0, ratecounter.NewRateCounter(1 * time.Minute), "restart", "m"},
 	}
 }
 
@@ -114,6 +156,15 @@ func (s *stats) MarshalLogObject(encoder zapcore.ObjectEncoder) error {
 
 func (s *stats) duration() time.Duration {
 	return time.Now().Sub(s.startTime)
+}
+
+func (s *stats) recordBlock(payloadSize int64) {
+	if s.timeToFirstBlock == 0 {
+		s.timeToFirstBlock = time.Now().Sub(s.startTime)
+	}
+
+	s.blockReceived.IncBy(1)
+	s.bytesReceived.IncBy(payloadSize)
 }
 
 func newBlockRange(raw string) (out blockRange) {
@@ -211,5 +262,5 @@ func (c *counter) Overall(elapsed time.Duration) string {
 		rate = rate / elapsed.Minutes()
 	}
 
-	return fmt.Sprintf("%d %s/%s (%d total)", uint64(rate), c.unit, "min", c.total)
+	return fmt.Sprintf("%d %s/%s (%d %s total)", uint64(rate), c.unit, "min", c.total, c.unit)
 }
