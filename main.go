@@ -67,7 +67,7 @@ func main() {
 	cursor := ""
 	lastBlockRef := bstream.BlockRefEmpty
 
-	zlog.Info("Starting firehose test", zap.String("endpoint", endpoint), zap.String("filter", filter), zap.Stringer("range", blockRange))
+	zlog.Info("Starting firehose test", zap.String("endpoint", endpoint), zap.Stringer("range", blockRange))
 stream:
 	for {
 		credentials := oauth.NewOauthAccess(&oauth2.Token{AccessToken: token, TokenType: "Bearer"})
