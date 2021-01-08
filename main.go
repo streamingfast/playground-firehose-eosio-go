@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"flag"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +15,7 @@ import (
 	"github.com/dfuse-io/bstream"
 	pbcodec "github.com/dfuse-io/dfuse-eosio/pb/dfuse/eosio/codec/v1"
 	"github.com/dfuse-io/dgrpc"
+	"github.com/dfuse-io/jsonpb"
 	"github.com/dfuse-io/logging"
 	pbbstream "github.com/dfuse-io/pbgo/dfuse/bstream/v1"
 	"github.com/golang/protobuf/ptypes"
@@ -20,6 +24,7 @@ import (
 	"go.uber.org/zap/zapcore"
 	"golang.org/x/oauth2"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/oauth"
 )
 
@@ -28,48 +33,51 @@ var statusFrequency = 15 * time.Second
 var traceEnabled = logging.IsTraceEnabled("consumer", "github.com/dfuse-io/playground-firehose-go")
 var zlog = logging.NewSimpleLogger("consumer", "github.com/dfuse-io/playground-firehose-go")
 
-func init() {
-	logging.TestingOverride()
-}
+var flagSkipVerify = flag.Bool("s", false, "When set, skips certification verification")
+var flagWrite = flag.String("o", "", "When set, write each block as one JSON line in the specified file, value '-' writes to standard output otherwise to a file, {range} is replaced by block range in this case")
 
 func main() {
+	flag.Parse()
+	args := flag.Args()
+
 	token := os.Getenv("DFUSE_API_TOKEN")
 
 	ensure(token != "", errorUsage("the environment variable DFUSE_API_TOKEN must be set to a valid dfuse API JWT token"))
-	ensure(len(os.Args) >= 4, errorUsage("missing arguments"))
+	ensure(len(args) == 3, errorUsage("missing arguments"))
 
-	endpoint := os.Args[1]
-	filter := os.Args[2]
-	blockRange := newBlockRange(os.Args[3])
+	endpoint := args[0]
+	filter := args[1]
+	blockRange := newBlockRange(args[2])
 
-	cursor := bstream.BlockRefEmpty
-	conn, err := dgrpc.NewExternalClient(endpoint)
+	var dialOptions []grpc.DialOption
+	if *flagSkipVerify {
+		dialOptions = []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{InsecureSkipVerify: true}))}
+	}
+
+	conn, err := dgrpc.NewExternalClient(endpoint, dialOptions...)
 	noError(err, "unable to create external gRPC client to %q", endpoint)
 
 	client := pbbstream.NewBlockStreamV2Client(conn)
+
 	stats := newStats()
 	nextStatus := time.Now().Add(statusFrequency)
+	writer, closer := blockWriter(blockRange)
+	defer closer()
+
+	cursor := ""
+	lastBlockRef := bstream.BlockRefEmpty
 
 	zlog.Info("Starting firehose test", zap.String("endpoint", endpoint), zap.String("filter", filter), zap.Stringer("range", blockRange))
 stream:
 	for {
-		start := blockRange.start
-		if cursor.Num() > start {
-			start = cursor.Num()
-		}
-
 		credentials := oauth.NewOauthAccess(&oauth2.Token{AccessToken: token, TokenType: "Bearer"})
 		stream, err := client.Blocks(context.Background(), &pbbstream.BlocksRequestV2{
-			Decoded: true,
-			// FIXME: This works only when streaming irreversible only, the full block reference should
-			//        be used but Firehose has a bug around StartBlockId (wrong type)
-			StartBlockNum:     int64(start),
+			StartBlockNum:     int64(blockRange.start),
+			StartCursor:       cursor,
 			StopBlockNum:      blockRange.end,
-			ExcludeStartBlock: false,
-			ExcludeStopBlock:  true,
-			HandleForks:       true,
-			HandleForksSteps:  []pbbstream.ForkStep{pbbstream.ForkStep_STEP_IRREVERSIBLE},
+			ForkSteps:         []pbbstream.ForkStep{pbbstream.ForkStep_STEP_IRREVERSIBLE},
 			IncludeFilterExpr: filter,
+			Details:           pbbstream.BlockDetails_BLOCK_DETAILS_LIGHT,
 		}, grpc.PerRPCCredentials(credentials))
 		noError(err, "unable to start blocks stream")
 
@@ -78,18 +86,10 @@ stream:
 			response, err := stream.Recv()
 			if err != nil {
 				if err == io.EOF {
-					if cursor.Num() >= blockRange.end-1 {
-						// Complete the outer loop which terminates streaming blocks
-						break stream
-					}
-
-					// FIXME: The firehose service has a bug where it can stop prior finishing the range, so until
-					//        it's fixed, we are going to break our the loop and restart the stream to continue further.
-					zlog.Warn("Stream closed while end range not reached, retrying", zap.Stringer("cursor", cursor), zap.Duration("retry_delay", retryDelay))
-					break
+					break stream
 				}
 
-				zlog.Error("Stream encountered a remote error, going to retry", zap.Stringer("cursor", cursor), zap.Duration("retry_delay", retryDelay), zap.Error(err))
+				zlog.Error("Stream encountered a remote error, going to retry", zap.String("cursor", cursor), zap.Stringer("last_block", lastBlockRef), zap.Duration("retry_delay", retryDelay), zap.Error(err))
 				break
 			}
 
@@ -98,18 +98,24 @@ stream:
 			err = ptypes.UnmarshalAny(response.Block, block)
 			noError(err, "should have been able to unmarshal received block payload")
 
-			cursor = block.AsRef()
-			if traceEnabled {
-				zlog.Debug("Block received", zap.Stringer("block", cursor), zap.Stringer("previous", bstream.NewBlockRefFromID(block.PreviousID())))
-			}
+			cursor = response.Cursor
+			lastBlockRef = block.AsRef()
 
-			stats.recordBlock(int64(response.XXX_Size()))
+			if traceEnabled {
+				zlog.Debug("Block received", zap.Stringer("block", lastBlockRef), zap.Stringer("previous", bstream.NewBlockRefFromID(block.PreviousID())), zap.String("cursor", cursor))
+			}
 
 			now := time.Now()
 			if now.After(nextStatus) {
 				zlog.Info("Stream blocks progress", zap.Object("stats", stats))
 				nextStatus = now.Add(statusFrequency)
 			}
+
+			if writer != nil {
+				writeBlock(writer, block)
+			}
+
+			stats.recordBlock(int64(response.XXX_Size()))
 		}
 
 		time.Sleep(5 * time.Second)
@@ -118,17 +124,49 @@ stream:
 
 	elapsed := stats.duration()
 
-	fmt.Println("")
-	fmt.Println("Completed streaming")
-	fmt.Printf("Duration: %s\n", elapsed)
-	fmt.Printf("Time to first block: %s\n", stats.timeToFirstBlock)
+	println("")
+	println("Completed streaming")
+	printf("Duration: %s\n", elapsed)
+	printf("Time to first block: %s\n", stats.timeToFirstBlock)
 	if stats.restartCount.total > 0 {
-		fmt.Printf("Restart count: %s\n", stats.restartCount.Overall(elapsed))
+		printf("Restart count: %s\n", stats.restartCount.Overall(elapsed))
 	}
 
-	fmt.Println("")
-	fmt.Printf("Block received: %s\n", stats.blockReceived.Overall(elapsed))
-	fmt.Printf("Bytes received: %s\n", stats.bytesReceived.Overall(elapsed))
+	println("")
+	printf("Block received: %s\n", stats.blockReceived.Overall(elapsed))
+	printf("Bytes received: %s\n", stats.bytesReceived.Overall(elapsed))
+}
+
+var endOfLine = []byte("\n")
+
+func writeBlock(writer io.Writer, block *pbcodec.Block) {
+	line, err := jsonpb.MarshalToString(block)
+	noError(err, "unable to marshal block %s to JSON", block.AsRef())
+
+	_, err = writer.Write([]byte(line))
+	noError(err, "unable to write block %s line to JSON", block.AsRef())
+
+	_, err = writer.Write(endOfLine)
+	noError(err, "unable to write block %s line ending", block.AsRef())
+}
+
+func blockWriter(bRange blockRange) (io.Writer, func()) {
+	if flagWrite == nil || strings.TrimSpace(*flagWrite) == "" {
+		return nil, func() {}
+	}
+
+	out := strings.Replace(strings.TrimSpace(*flagWrite), "{range}", strings.ReplaceAll(bRange.String(), " ", ""), 1)
+	if out == "-" {
+		return os.Stdout, func() {}
+	}
+
+	dir := filepath.Dir(out)
+	noError(os.MkdirAll(dir, os.ModePerm), "unable to create directories %q", dir)
+
+	file, err := os.Create(out)
+	noError(err, "unable to create file %q", out)
+
+	return file, func() { file.Close() }
 }
 
 type stats struct {
@@ -215,8 +253,16 @@ func noError(err error, message string, args ...interface{}) {
 }
 
 func quit(message string, args ...interface{}) {
-	fmt.Printf(message+"\n", args...)
+	printf(message+"\n", args...)
 	os.Exit(1)
+}
+
+func printf(format string, args ...interface{}) {
+	fmt.Fprintf(os.Stderr, format, args...)
+}
+
+func println(args ...interface{}) {
+	fmt.Fprintln(os.Stderr, args...)
 }
 
 type blockRange struct {
