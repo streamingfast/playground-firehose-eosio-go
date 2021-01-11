@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dfuse-io/bstream"
+	dfuse "github.com/dfuse-io/client-go"
 	pbcodec "github.com/dfuse-io/dfuse-eosio/pb/dfuse/eosio/codec/v1"
 	"github.com/dfuse-io/dgrpc"
 	"github.com/dfuse-io/jsonpb"
@@ -38,12 +39,12 @@ var flagWrite = flag.String("o", "", "When set, write each block as one JSON lin
 
 func main() {
 	flag.Parse()
+
 	args := flag.Args()
-
-	token := os.Getenv("DFUSE_API_TOKEN")
-
-	ensure(token != "", errorUsage("the environment variable DFUSE_API_TOKEN must be set to a valid dfuse API JWT token"))
 	ensure(len(args) == 3, errorUsage("missing arguments"))
+
+	apiKey := os.Getenv("DFUSE_API_KEY")
+	ensure(apiKey != "", errorUsage("the environment variable DFUSE_API_KEY must be set to a valid dfuse API key value"))
 
 	endpoint := args[0]
 	filter := args[1]
@@ -54,10 +55,13 @@ func main() {
 		dialOptions = []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{InsecureSkipVerify: true}))}
 	}
 
+	dfuse, err := dfuse.NewClient("blocks.mainnet.eos.dfuse.io", apiKey)
+	noError(err, "unable to create dfuse client")
+
 	conn, err := dgrpc.NewExternalClient(endpoint, dialOptions...)
 	noError(err, "unable to create external gRPC client to %q", endpoint)
 
-	client := pbbstream.NewBlockStreamV2Client(conn)
+	streamClient := pbbstream.NewBlockStreamV2Client(conn)
 
 	stats := newStats()
 	nextStatus := time.Now().Add(statusFrequency)
@@ -70,8 +74,11 @@ func main() {
 	zlog.Info("Starting firehose test", zap.String("endpoint", endpoint), zap.Stringer("range", blockRange))
 stream:
 	for {
-		credentials := oauth.NewOauthAccess(&oauth2.Token{AccessToken: token, TokenType: "Bearer"})
-		stream, err := client.Blocks(context.Background(), &pbbstream.BlocksRequestV2{
+		tokenInfo, err := dfuse.GetAPITokenInfo(context.Background())
+		noError(err, "unable to retrieve dfuse API token")
+
+		credentials := oauth.NewOauthAccess(&oauth2.Token{AccessToken: tokenInfo.Token, TokenType: "Bearer"})
+		stream, err := streamClient.Blocks(context.Background(), &pbbstream.BlocksRequestV2{
 			StartBlockNum:     int64(blockRange.start),
 			StartCursor:       cursor,
 			StopBlockNum:      blockRange.end,
