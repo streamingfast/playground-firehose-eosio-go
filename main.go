@@ -55,7 +55,7 @@ func main() {
 		dialOptions = []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{InsecureSkipVerify: true}))}
 	}
 
-	dfuse, err := dfuse.NewClient("blocks.mainnet.eos.dfuse.io", apiKey)
+	dfuse, err := dfuse.NewClient(endpoint, apiKey)
 	noError(err, "unable to create dfuse client")
 
 	conn, err := dgrpc.NewExternalClient(endpoint, dialOptions...)
