@@ -215,13 +215,18 @@ func (s *stats) recordBlock(payloadSize int64) {
 func newBlockRange(raw string) (out blockRange) {
 	input := strings.ReplaceAll(raw, " ", "")
 	parts := strings.Split(input, "-")
-	ensure(len(parts) == 2, "<range> input should be of the form <start>-<stop> (spaces accepted), got %q", raw)
+	ensure(len(parts) == 2, "<range> input should be of the form <start>-<stop> or <start>- (spaces accepted), got %q", raw)
 	ensure(isUint(parts[0]), "the <range> start value %q is not a valid uint64 value", parts[0])
-	ensure(isUint(parts[1]), "the <range> end value %q is not a valid uint64 value", parts[1])
+	ensure(parts[1] == "" || isUint(parts[1]), "the <range> end value %q is not a valid uint64 value", parts[1])
 
 	out.start, _ = strconv.ParseUint(parts[0], 10, 64)
-	out.end, _ = strconv.ParseUint(parts[1], 10, 64)
-	ensure(out.start < out.end, "the <range> start value %q value comes after end value %q", parts[0], parts[1])
+	if parts[1] != "" {
+		out.end, _ = strconv.ParseUint(parts[1], 10, 64)
+	}
+
+	if out.end != 0 {
+		ensure(out.start < out.end, "the <range> start value %q value comes after end value %q", parts[0], parts[1])
+	}
 	return
 }
 
@@ -243,7 +248,8 @@ taken to fetch blocks, amount of bytes received, throuput stats, etc.
 The <filter> is a valid CEL filter expression for the EOSIO network.
 
 The <range> value must be in the form [<start>-<stop>] like "150 000 000 - 150 010 000"
-(spaces are trimmed automatically so it's fine to use them).
+(spaces are trimmed automatically so it's fine to use them). If the <stop> value is omitted,
+it becomes a never ending streaming of blocks.
 `
 }
 
