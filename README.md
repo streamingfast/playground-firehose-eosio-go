@@ -41,7 +41,7 @@ Stream of irreversble blocks from the past:
 
 ```
     grpcurl -H "Authorization: Bearer $DFUSE_TOKEN" \
-       -d '{"start_block_num": 138000000, "stop_block_num": 139000000, "decoded": true, "handleForks": true, "handleForksSteps": ["STEP_IRREVERSIBLE"], "include_filter_expr": ""}' \
+       -d '{"start_block_num": 138000000, "stop_block_num": 139000000, "fork_steps": ["STEP_IRREVERSIBLE"], "include_filter_expr": ""}' \
        -import-path . \
        -proto bstream.proto \
        -proto codec.proto \
@@ -56,7 +56,7 @@ If the connection is interrupted, your process crashes or whatever, continue whe
 
 ```
     grpcurl -H "Authorization: Bearer $DFUSE_TOKEN" \
-       -d '{"start_block_num": 138500000, "stop_block_num": 139000000, "decoded": true, "handleForks": true, "handleForksSteps": ["STEP_IRREVERSIBLE"], "include_filter_expr": ""}' \
+       -d '{"start_block_num": 138500000, "stop_block_num": 139000000, "fork_steps": ["STEP_IRREVERSIBLE"], "include_filter_expr": ""}' \
        -import-path . \
        -proto bstream.proto \
        -proto codec.proto \
