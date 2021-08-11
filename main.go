@@ -15,8 +15,8 @@ import (
 	"github.com/dfuse-io/bstream"
 	dfuse "github.com/dfuse-io/client-go"
 	pbcodec "github.com/dfuse-io/dfuse-eosio/pb/dfuse/eosio/codec/v1"
-	"github.com/dfuse-io/dgrpc"
-	"github.com/dfuse-io/jsonpb"
+	"github.com/streamingfast/dgrpc"
+	"github.com/streamingfast/jsonpb"
 	"github.com/dfuse-io/logging"
 	pbbstream "github.com/dfuse-io/pbgo/dfuse/bstream/v1"
 	"github.com/golang/protobuf/ptypes"
@@ -34,8 +34,11 @@ var statusFrequency = 15 * time.Second
 var traceEnabled = logging.IsTraceEnabled("consumer", "github.com/dfuse-io/playground-firehose-go")
 var zlog = logging.NewSimpleLogger("consumer", "github.com/dfuse-io/playground-firehose-go")
 
+var flagInsecure = flag.Bool("i", false, "When set, assume with talk over a plain-text unecrypted gRPC connection")
 var flagSkipVerify = flag.Bool("s", false, "When set, skips certification verification")
-var flagWrite = flag.String("o", "", "When set, write each block as one JSON line in the specified file, value '-' writes to standard output otherwise to a file, {range} is replaced by block range in this case")
+var flagFull = flag.Bool("f", false, "When set, returns full block which include all trace fields, the default when unset is to stream light blocks which contains only important blocks and transaction traces (included nested sub-elements) like id, number, inputs & outputs")
+var flagOutput = flag.String("o", "", "When set, write each block as one JSON line in the specified file, value '-' writes to standard output otherwise to a file, {range} is replaced by block range in this case")
+var flagLive = flag.Bool("l", false, "When set, stream reversible blocks instead of irreversibly only, you will receive undo/new step wrapped object in those mode, irreversible only is the default when this is not set")
 
 func main() {
 	flag.Parse()
@@ -68,6 +71,16 @@ func main() {
 	writer, closer := blockWriter(blockRange)
 	defer closer()
 
+	details := pbbstream.BlockDetails_BLOCK_DETAILS_LIGHT
+	if *flagFull == true {
+		details = pbbstream.BlockDetails_BLOCK_DETAILS_FULL
+	}
+
+	forkSteps := []pbbstream.ForkStep{pbbstream.ForkStep_STEP_IRREVERSIBLE}
+	if *flagLive == true {
+		forkSteps = []pbbstream.ForkStep{pbbstream.ForkStep_STEP_NEW | pbbstream.ForkStep_STEP_UNDO}
+	}
+
 	cursor := ""
 	lastBlockRef := bstream.BlockRefEmpty
 
@@ -82,9 +95,9 @@ stream:
 			StartBlockNum:     int64(blockRange.start),
 			StartCursor:       cursor,
 			StopBlockNum:      blockRange.end,
-			ForkSteps:         []pbbstream.ForkStep{pbbstream.ForkStep_STEP_IRREVERSIBLE},
+			ForkSteps:         forkSteps,
 			IncludeFilterExpr: filter,
-			Details:           pbbstream.BlockDetails_BLOCK_DETAILS_LIGHT,
+			Details:           details,
 		}, grpc.PerRPCCredentials(credentials))
 		noError(err, "unable to start blocks stream")
 
@@ -125,7 +138,7 @@ stream:
 			stats.recordBlock(int64(response.XXX_Size()))
 		}
 
-		time.Sleep(5 * time.Second)
+		time.Sleep(retryDelay)
 		stats.restartCount.IncBy(1)
 	}
 
@@ -158,11 +171,11 @@ func writeBlock(writer io.Writer, block *pbcodec.Block) {
 }
 
 func blockWriter(bRange blockRange) (io.Writer, func()) {
-	if flagWrite == nil || strings.TrimSpace(*flagWrite) == "" {
+	if flagOutput == nil || strings.TrimSpace(*flagOutput) == "" {
 		return nil, func() {}
 	}
 
-	out := strings.Replace(strings.TrimSpace(*flagWrite), "{range}", strings.ReplaceAll(bRange.String(), " ", ""), 1)
+	out := strings.Replace(strings.TrimSpace(*flagOutput), "{range}", strings.ReplaceAll(bRange.String(), " ", ""), 1)
 	if out == "-" {
 		return os.Stdout, func() {}
 	}
