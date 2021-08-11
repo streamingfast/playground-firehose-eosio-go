@@ -18,7 +18,7 @@ import (
 	"github.com/streamingfast/dgrpc"
 	"github.com/streamingfast/jsonpb"
 	"github.com/dfuse-io/logging"
-	pbbstream "github.com/dfuse-io/pbgo/dfuse/bstream/v1"
+	pbbstream "github.com/streamingfast/pbgo/dfuse/bstream/v1"
 	"github.com/golang/protobuf/ptypes"
 	"github.com/paulbellamy/ratecounter"
 	"go.uber.org/zap"
