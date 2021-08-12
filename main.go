@@ -12,15 +12,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dfuse-io/bstream"
-	dfuse "github.com/streamingfast/client-go"
 	pbcodec "github.com/dfuse-io/dfuse-eosio/pb/dfuse/eosio/codec/v1"
-	"github.com/streamingfast/dgrpc"
-	"github.com/streamingfast/jsonpb"
-	"github.com/dfuse-io/logging"
-	pbbstream "github.com/streamingfast/pbgo/dfuse/bstream/v1"
 	"github.com/golang/protobuf/ptypes"
 	"github.com/paulbellamy/ratecounter"
+	"github.com/streamingfast/bstream"
+	dfuse "github.com/streamingfast/client-go"
+	"github.com/streamingfast/dgrpc"
+	"github.com/streamingfast/jsonpb"
+	"github.com/streamingfast/logging"
+	pbbstream "github.com/streamingfast/pbgo/dfuse/bstream/v1"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"golang.org/x/oauth2"
@@ -32,7 +32,8 @@ import (
 var retryDelay = 5 * time.Second
 var statusFrequency = 15 * time.Second
 var traceEnabled = logging.IsTraceEnabled("consumer", "github.com/dfuse-io/playground-firehose-go")
-var zlog = logging.NewSimpleLogger("consumer", "github.com/dfuse-io/playground-firehose-go")
+var zlog *zap.Logger
+var tracer = logging.ApplicationLogger("consumer", "github.com/dfuse-io/playground-firehose-go", &zlog)
 
 var flagInsecure = flag.Bool("i", false, "When set, assume with talk over a plain-text unecrypted gRPC connection")
 var flagSkipVerify = flag.Bool("s", false, "When set, skips certification verification")
