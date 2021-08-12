@@ -1,5 +1,6 @@
-The dfuse Firehose for EOSIO
-----------------------------
+# StreamingFast Firehose for EOSIO
+[![reference](https://img.shields.io/badge/godoc-reference-5272B4.svg?style=flat-square)](https://pkg.go.dev/github.com/streamingfast/playground-firehose-eosio-go)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 Benefits:
 * single integration for accessing history and real-time, low-latency stream of live block data
@@ -113,3 +114,17 @@ Here, in combination:
 ```
 !(trx_action_count > 200 && top5_trx_actors.exists(x, x in ['eosiopowcoin','eidosonecoin','mine4charity'])) && (account in ['newdexpublic','dice.bg','wallet.bg','pokerwar.bg','bulls.bg','diceproxy.bg','texas.bg','slot.bg','bonus.bg','dividend.bg','candy.bg','miner.bg','giver.bg','threecard.bg','swap.defi'] || receiver in ['newdexpublic','dice.bg','wallet.bg','pokerwar.bg','bulls.bg','diceproxy.bg','texas.bg','slot.bg','bonus.bg','dividend.bg','candy.bg','miner.bg','giver.bg','threecard.bg','swap.defi'] || auth.exists (x, x in ['newdexpublic','dice.bg','wallet.bg','pokerwar.bg','bulls.bg','diceproxy.bg','texas.bg','slot.bg','bonus.bg','dividend.bg','candy.bg','miner.bg','giver.bg','threecard.bg','swap.defi']))
 ```
+## Contributing
+
+**Issues and PR in this repo related strictly to Firehose for EOSIO.**
+
+Report any protocol-specific issues in their
+[respective repositories](https://github.com/streamingfast/streamingfast#protocols)
+
+**Please first refer to the general
+[StreamingFast contribution guide](https://github.com/streamingfast/streamingfast/blob/master/CONTRIBUTING.md)**,
+if you wish to contribute to this code base.
+
+## License
+
+[Apache 2.0](LICENSE)

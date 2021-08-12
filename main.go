@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/dfuse-io/bstream"
-	dfuse "github.com/dfuse-io/client-go"
+	dfuse "github.com/streamingfast/client-go"
 	pbcodec "github.com/dfuse-io/dfuse-eosio/pb/dfuse/eosio/codec/v1"
 	"github.com/streamingfast/dgrpc"
 	"github.com/streamingfast/jsonpb"
